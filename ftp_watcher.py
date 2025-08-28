@@ -5,43 +5,59 @@ import threading
 from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from app import process_file  # Импортируй свою функцию обработки
+from app import process_file  # ваша функция
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
-
-# Папка для наблюдения
 WATCH_FOLDER = "/home/test_project/ftp_uploads"
 file_queue = Queue()
 
-def wait_until_file_is_ready(filepath, timeout=10, check_interval=1):
-    """Ожидает, пока файл не перестанет изменяться (или истечёт таймаут)"""
+SUPPORTED = (".xlsx", ".csv")
+
+def wait_until_file_is_ready(filepath, timeout=30, check_interval=1):
+    """Ждём стабилизации размера/mtime, чтобы не ловить недописанные файлы."""
     last_size = -1
-    for _ in range(timeout):
+    last_mtime = -1
+    stable_ticks = 0
+    needed_stable = 2  # два подряд стабильных замера
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            current_size = os.path.getsize(filepath)
-            if current_size == last_size:
-                return True
-            last_size = current_size
+            st = os.stat(filepath)
+            if st.st_size == last_size and st.st_mtime == last_mtime:
+                stable_ticks += 1
+                if stable_ticks >= needed_stable:
+                    return True
+            else:
+                stable_ticks = 0
+                last_size, last_mtime = st.st_size, st.st_mtime
         except FileNotFoundError:
             pass
         time.sleep(check_interval)
     return False
 
 class UploadHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if event.is_directory:
+    def _maybe_enqueue(self, path):
+        if not os.path.isfile(path):
             return
+        if not path.lower().endswith(SUPPORTED):
+            return
+        filename = os.path.basename(path)
+        logging.info(f"[WATCHER] Найден файл: {filename}, проверяю готовность...")
+        if wait_until_file_is_ready(path):
+            logging.info(f"[WATCHER] Файл {filename} готов, добавляю в очередь")
+            file_queue.put(path)
+        else:
+            logging.error(f"[WATCHER] Файл {filename} не стабилизировался вовремя")
 
-        if event.src_path.endswith(".xlsx"):
-            filename = os.path.basename(event.src_path)
-            logging.info(f"[WATCHER] Найден файл: {filename}, проверяю готовность...")
+    def on_created(self, event):
+        if not event.is_directory:
+            self._maybe_enqueue(event.src_path)
 
-            if wait_until_file_is_ready(event.src_path):
-                logging.info(f"[WATCHER] Файл {filename} готов, добавляю в очередь")
-                file_queue.put(event.src_path)
-            else:
-                logging.error(f"[WATCHER] Файл {filename} не стабилизировался вовремя")
+    # иногда клиенты создают через tmp → потом переименовывают
+    def on_moved(self, event):
+        if not event.is_directory:
+            self._maybe_enqueue(event.dest_path)
 
 def worker():
     while True:
@@ -63,7 +79,6 @@ if __name__ == "__main__":
     observer.schedule(UploadHandler(), path=WATCH_FOLDER, recursive=False)
     observer.start()
 
-    # Запуск потока-обработчика очереди
     threading.Thread(target=worker, daemon=True).start()
 
     try:
