@@ -1,0 +1,19 @@
+[0;1;32m*[0m ftp_watcher.service - FTP Watcher for processing uploaded files
+     Loaded: loaded (/etc/systemd/system/ftp_watcher.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Fri 2025-08-01 11:34:32 EEST; 3 weeks 5 days ago
+   Main PID: 492 (python3)
+      Tasks: 5 (limit: 1078)
+     Memory: 71.7M
+     CGroup: /system.slice/ftp_watcher.service
+             `-492 /usr/bin/python3 /home/test_project/ftp_watcher.py
+
+Aug 21 09:59:43 api.s python3[492]: INFO:root:[WATCHER] \u041d\u0430\u0439\u0434\u0435\u043d \u0444\u0430\u0439\u043b: qwerty5.xlsx, \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u044e \u0433\u043e\u0442\u043e\u0432\u043d\u043e\u0441\u0442\u044c...
+Aug 21 09:59:44 api.s python3[492]: INFO:root:[WATCHER] \u0424\u0430\u0439\u043b qwerty5.xlsx \u0433\u043e\u0442\u043e\u0432, \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u044e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c
+Aug 21 09:59:44 api.s python3[492]: INFO:root:[QUEUE] \u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430 \u0444\u0430\u0439\u043b\u0430: /home/test_project/ftp_uploads/qwerty5.xlsx
+Aug 21 09:59:44 api.s python3[492]: INFO:root:Executing command: sshpass -p B6z2S9gwn29J scp -P 5034 /home/test_project/ftp_uploads/qwerty5.xlsx root@83.69.192.170:/home/GetChips_API/project2.0/uploads/qwerty5.xlsx
+Aug 21 09:59:46 api.s python3[492]: DEBUG:watchdog.observers.inotify_buffer:in-event <InotifyEvent: src_path=b'/home/test_project/ftp_uploads/qwerty5.xlsx', wd=1, mask=IN_OPEN, cookie=0, name='qwerty5.xlsx'>
+Aug 21 09:59:46 api.s python3[492]: INFO:root:File /home/test_project/ftp_uploads/qwerty5.xlsx successfully uploaded to /home/GetChips_API/project2.0/uploads/qwerty5.xlsx.
+Aug 21 09:59:46 api.s python3[492]: DEBUG:watchdog.observers.inotify_buffer:in-event <InotifyEvent: src_path=b'/home/test_project/ftp_uploads/qwerty5.xlsx', wd=1, mask=IN_OPEN, cookie=0, name='qwerty5.xlsx'>
+Aug 21 09:59:46 api.s python3[492]: DEBUG:watchdog.observers.inotify_buffer:in-event <InotifyEvent: src_path=b'/home/test_project/ftp_uploads/qwerty5.xlsx', wd=1, mask=IN_OPEN, cookie=0, name='qwerty5.xlsx'>
+Aug 21 09:59:46 api.s python3[492]: ERROR:root:\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0435 \u0444\u0430\u0439\u043b\u0430: "There is no item named 'xl/sharedStrings.xml' in the archive"
+Aug 21 09:59:46 api.s python3[492]: ERROR:root:[QUEUE] \u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0435 \u0444\u0430\u0439\u043b\u0430 /home/test_project/ftp_uploads/qwerty5.xlsx: "There is no item named 'xl/sharedStrings.xml' in the archive"

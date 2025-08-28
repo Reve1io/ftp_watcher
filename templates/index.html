@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles.css') }}">
+    <title>Загрузка файла</title>
+</head>
+<body>
+    <div class="container">
+        <h2>Загрузите ваш файл</h2>
+        <!-- Отображение флэш-сообщений -->
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        <form action="/" method="POST" enctype="multipart/form-data">
+            <input id="file-input" type="file" name="file">
+            <button class="upload-btn" type="submit">Загрузить</button>
+        </form>
+    </div>
+</body>
+</html>

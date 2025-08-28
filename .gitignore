@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+uploads/
+ftp_uploads/
+.env
+*.log
+.DS_Store
