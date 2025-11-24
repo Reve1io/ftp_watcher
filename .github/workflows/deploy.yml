@@ -1,0 +1,44 @@
+name: CI/CD Deploy FTP Watcher v2.0
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Можно добавить pytest, если есть тесты
+          # pytest
+
+      - name: Deploy to remote server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            cd /home/ftp_watcher
+            git fetch origin master
+            # Сохраняем .env перед сбросом
+            cp .env /tmp/env_backup
+            git reset --hard origin/master
+            git clean -fd
+            # Восстанавливаем .env
+            mv /tmp/env_backup .env
+            source venv/bin/activate
+            pip install -r requirements.txt
+            systemctl restart ftp_watcher_v2.0.service
