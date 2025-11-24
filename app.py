@@ -1,488 +1,137 @@
 import os
-import pandas as pd
-from flask import Flask, request, render_template, flash, redirect, url_for
-from flask.cli import load_dotenv
-from werkzeug.utils import secure_filename
-import subprocess
-from ftplib import FTP
-from nexarClient import NexarClient
+import time
 import logging
-import json
-from zeep import Client, Settings
-from zeep.transports import Transport
-import requests
-from requests.auth import HTTPBasicAuth
-import asyncio
-
-load_dotenv()
+import threading
+from queue import Queue
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from processing import process_file  # Импортируй свою функцию обработки
 
 # Настройка логирования
-logging.basicConfig(level=logging.DEBUG)
-
-# Конфигурация Flask
-UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'xlsx'}
-
-app = Flask(__name__)
-app.secret_key = 'your_secret_key'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-def upload_to_ssh(file_path):
-    if os.name == 'nt':
-        logging.info('Windows is not supported, skip upload')
-        return True
-
-    try:
-        subprocess.run(['/usr/bin/which', 'sshpass'], check=True, capture_output=True)
-    except subprocess.CalledProcessError:
-        logging.warning("⏭️ sshpass not found — skipping SSH upload")
-        return True
-
-    ssh_host = os.getenv('STORAGE_IP')
-    ssh_port = os.getenv('STORAGE_PORT')
-    ssh_user = os.getenv('STORAGE_USER')
-    ssh_password = os.getenv('STORAGE_PASSWORD')
-
-    remote_path = f'/home/GetChips_API/project2.0/uploads/{os.path.basename(file_path)}'
-
-    scp_command = (
-        f"/usr/bin/sshpass -p {ssh_password} scp -P {ssh_port} "
-        f"{file_path} {ssh_user}@{ssh_host}:{remote_path}"
-    )
-
-    try:
-        subprocess.run(scp_command, shell=True, check=True)
-        logging.info(f"Uploaded to SSH: {remote_path}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"SCP Error: {e.stderr.decode()}")
-        raise
-
-
-def upload_to_ftp(file_path):
-    ftp_host = os.getenv('SERVER_HOST')
-    ftp_user = os.getenv('SERVER_USER')
-    ftp_password = os.getenv('SERVER_PASSWORD')
-
-    logging.info(f"FTP HOST: {ftp_host}, USER: {ftp_user}")
-
-    try:
-        with FTP(ftp_host) as ftp:
-            ftp.login(ftp_user, ftp_password)
-            with open(file_path, 'rb') as f:
-                ftp.storbinary(f'STOR {os.path.basename(file_path)}', f)
-        logging.info(f"Uploaded to FTP: {file_path}")
-    except Exception as e:
-        logging.error(f"FTP error: {str(e)}")
-        raise
-
-
-def sanitize_for_1c(obj):
-    """
-    Рекурсивно заменяет все None на пустые строки для корректной отправки в 1С
-    """
-    if isinstance(obj, dict):
-        return {k: sanitize_for_1c(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [sanitize_for_1c(v) for v in obj]
-    elif obj is None:
-        return ""
-    else:
-        return obj
-
-
-def send_octopart_to_1c(data):
-
-    wsdl_url = os.getenv("URL_1C")
-    username = os.getenv("USER_1C")
-    password = os.getenv("PASSWORD_1C")
-
-    if not wsdl_url or not username or not password:
-        logging.error("❌ Не заданы параметры подключения к 1С")
-        return
-
-    sanitized_data = sanitize_for_1c(data)
-    json_str = json.dumps(sanitized_data, ensure_ascii=False)
-
-    session = requests.Session()
-    session.auth = HTTPBasicAuth(username, password)
-    transport = Transport(session=session)
-    settings = Settings(strict=False, xml_huge_tree=True)
-
-    try:
-        client = Client(wsdl=wsdl_url, transport=transport, settings=settings)
-        response = client.service.ReturnOctopartData(json_str)
-        logging.info(f"[1C SOAP] Данные успешно отправлены. Ответ: {response}")
-    except Exception as e:
-        logging.error(f"[1C SOAP] Ошибка отправки данных в 1С: {str(e)}")
-
-
-def process_part(part, original_mpn, found_mpn, ALLOWED_SELLERS, requested_quantity=None):
-    """
-    Универсальная обработка результата одного part
-    Возвращает список записей (часто 1+, если несколько цен).
-    """
-
-    output_records = []
-
-    # === Безопасное извлечение данных ===
-    original_mpn = original_mpn or ""
-    part_name = part.get("name") or ""
-    manufacturer_node = part.get("manufacturer") or {}
-    category_node = part.get("category") or {}
-    images = part.get("images") or []
-    descriptions = part.get("descriptions") or []
-    sellers = part.get("sellers") or []
-
-    # manufacturer
-    if isinstance(manufacturer_node, dict):
-        manufacturer_id = manufacturer_node.get("id")
-        manufacturer_name = manufacturer_node.get("name")
-    else:
-        manufacturer_id = None
-        manufacturer_name = str(manufacturer_node)
-
-    # category
-    category_id = category_node.get("id")
-    category_name = category_node.get("name")
-
-    # image URL (берём первую)
-    image_url = images[0]["url"] if images and isinstance(images[0], dict) else None
-
-    # description (тоже первую)
-    description = descriptions[0]["text"] if descriptions and isinstance(descriptions[0], dict) else None
-
-
-    # === Проходим всех продавцов ===
-    for seller in sellers:
-        company = seller.get("company") or {}
-        seller_name = company.get("name")
-        seller_id = company.get("id")
-        seller_verified = company.get("isVerified")
-        seller_homepageUrl = company.get("homepageUrl")
-
-        if not seller_name:
-            continue
-
-        if ALLOWED_SELLERS and seller_name not in ALLOWED_SELLERS:
-            continue
-
-        offers = seller.get("offers") or []
-
-        # === Проходим офферы ===
-        for offer in offers:
-            stock = offer.get("inventoryLevel")
-            prices = offer.get("prices") or []
-
-            # цены внутри оффера
-            for price in prices:
-                base_price = price.get("convertedPrice")
-                currency = price.get("convertedCurrency") or price.get("currency")
-                offer_quantity = price.get("quantity")
-
-                # защита от кривых данных
-                try:
-                    base_price = float(base_price)
-                except:
-                    base_price = None
-
-                # Ценообразование
-                delivery_coef = 1.27
-                markup = 1.18
-
-                if base_price:
-                    target_price_purchasing = base_price * 0.82
-                    cost_with_delivery = target_price_purchasing + delivery_coef
-                    target_price_sales = target_price_purchasing + delivery_coef + markup
-                else:
-                    target_price_purchasing = None
-                    cost_with_delivery = None
-                    target_price_sales = None
-
-                output_records.append({
-                    "requested_mpn": original_mpn,
-                    "mpn": found_mpn,
-                    "manufacturer": manufacturer_name,
-                    "manufacturer_id": manufacturer_id,
-                    "manufacturer_name": manufacturer_name,
-
-                    "seller_id": seller_id,
-                    "seller_name": seller_name,
-                    "seller_verified": seller_verified,
-                    "seller_homepageUrl": seller_homepageUrl,
-
-                    "stock": stock,
-                    "offer_quantity": offer_quantity,
-                    "price": base_price,
-                    "currency": currency,
-
-                    "category_id": category_id,
-                    "category_name": category_name,
-                    "image_url": image_url,
-                    "description": description,
-
-                    "requested_quantity": requested_quantity,
-                    "status": "Найдено",
-
-                    "delivery_coef": delivery_coef,
-                    "markup": markup,
-                    "target_price_purchasing": round(target_price_purchasing, 2) if target_price_purchasing else None,
-                    "cost_with_delivery": round(cost_with_delivery, 2) if cost_with_delivery else None,
-                    "target_price_sales": round(target_price_sales, 2) if target_price_sales else None
-                })
-
-    return output_records
-
-async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
-    """
-    Асинхронная обработка списка MPN.
-    1. Получаем все вариации через supSearch.
-    2. Получаем детальную информацию через supMultiMatch.
-    3. Формируем output_data.
-    4. Отправляем в 1С через send_octopart_to_1c.
-    """
-    clientId = os.getenv("NEXAR_ID")
-    clientSecret = os.getenv("NEXAR_TOKEN")
-    nexar = NexarClient(clientId, clientSecret)
-
-    ALLOWED_SELLERS = [
-        "Mouser", "Digi-Key", "Arrow", "TTI", "ADI",
-        "Coilcraft", "Rochester", "Verical", "Texas Instruments", "MINICIRCUITS"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        #logging.FileHandler('/var/log/file-watcher.log'),
+        logging.StreamHandler()
     ]
+)
 
-    output_data = []
+# Папка для наблюдения
+WATCH_FOLDER = ""
+file_queue = Queue()
 
-    # --- 1. Получение всех вариаций через supSearch ---
-    async def partial_request_variations(mpn_item):
-        gqlQuery = '''
-    query Search ($q: String!) {
-      supSearch(q: $q, limit: 50, currency: "USD") {
-        results {
-          part { 
-            mpn
-            name
-            manufacturer { name }
-            similarParts {
-              mpn
-              manufacturer { name }
-            }
-          }
-        }
-      }
-    }
-        '''
-        variables = {"q": mpn_item["mpn"]}
+if os.name == "nt":
+    WATCH_FOLDER = "D:/dev/ftp_watcher/watch"
+else:
+    WATCH_FOLDER = "/home/test_project/ftp_uploads"
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = nexar.get_query(gqlQuery, variables) or {}
-                break
-            except Exception as e:
-                wait = 2 ** (attempt - 1)
-                logging.warning(
-                    f"Partial-запрос Nexar ошибка ({mpn_item['mpn']}, попытка {attempt}/{max_retries}): {e}. Жду {wait}s."
-                )
-                await asyncio.sleep(wait)
-        else:
-            return [mpn_item["mpn"]]
+def wait_until_file_is_ready(filepath, timeout=60, check_interval=5):
+    """Ожидает, пока файл не перестанет изменяться"""
+    last_size = -1
+    stable_count = 0
+    required_stable_checks = 5  # Требуем 3 стабильных проверки подряд
+    
+    for attempt in range(timeout):
+        try:
+            if not os.path.exists(filepath):
+                logging.warning(f"Файл {filepath} не найден, ожидание...")
+                time.sleep(check_interval)
+                continue
+                
+            current_size = os.path.getsize(filepath)
+            if current_size == last_size:
+                stable_count += 1
+                if stable_count >= required_stable_checks:
+                    logging.info(f"Файл стабилизирован после {attempt} секунд")
+                    return True
+            else:
+                stable_count = 0
+                last_size = current_size
+                
+        except Exception as e:
+            logging.warning(f"Ошибка проверки файла {filepath}: {e}")
+            
+        time.sleep(check_interval)
+    
+    logging.warning(f"Файл {filepath} не стабилизировался за {timeout} секунд")
+    return False
 
-        variants = []
-        for item in result.get("supSearch", {}).get("results", []):
-            part = item.get("part")
-            if part and part.get("mpn"):
-                variants.append(part["mpn"])
+class UploadHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory:
+            return
 
-                for similar in part.get("similarParts", []):
-                    if similar.get("mpn"):
-                        variants.append(similar["mpn"])
+        if event.src_path.endswith((".xlsx", ".xls")):
+            filename = os.path.basename(event.src_path)
+            logging.info(f"📁 Обнаружен новый файл: {filename}")
+            
+            # Даем файлу время на полную загрузку
+            time.sleep(2)
+            
+            if wait_until_file_is_ready(event.src_path):
+                logging.info(f"✅ Файл {filename} готов к обработке")
+                file_queue.put(os.path.normpath(event.src_path))
+            else:
+                logging.error(f"❌ Файл {filename} не готов к обработке")
 
-        return variants or [mpn_item["mpn"]]
+def worker():
+    """Рабочий поток для обработки файлов"""
+    logging.info("👷 Worker thread started")
+    while True:
+        filepath = file_queue.get()
+        if filepath is None:
+            break
+            
+        try:
+            if os.path.exists(filepath):
+                logging.info(f"🔄 Начало обработки: {os.path.basename(filepath)}")
+                process_file(filepath)
+                logging.info(f"✅ Успешно обработан: {os.path.basename(filepath)}")
+            else:
+                logging.error(f"❌ Файл не найден: {filepath}")
+                
+        except Exception as e:
+            logging.error(f"💥 Ошибка обработки {filepath}: {e}")
+        finally:
+            file_queue.task_done()
 
-    # запускаем partial для всех MPN
-    partial_tasks = [partial_request_variations(item) for item in mpn_list]
-    all_variants_lists = await asyncio.gather(*partial_tasks)
-
-    # создаём mapping
-    mapping = {
-        item["mpn"]: {
-            "variants": variants,
-            "quantity": item.get("quantity"),
-            "results": {}
-        }
-        for item, variants in zip(mpn_list, all_variants_lists)
-    }
-
-    # --- 2. Получение данных через supMultiMatch ---
-    multi_mpn_list = [{"mpn": v} for sublist in all_variants_lists for v in sublist]
-
-    for i in range(0, len(multi_mpn_list), chunk_size):
-        chunk = multi_mpn_list[i:i + chunk_size]
-        variables = {"queries": [{"mpn": item["mpn"]} for item in chunk]}
-
-        gqlQuery = '''
-        query csvDemo($queries: [SupPartMatchQuery!]!) {
-          supMultiMatch(currency: "USD", queries: $queries) {
-            parts {
-              mpn
-              name
-              category { id name }
-              images { url }
-              descriptions { text }
-              manufacturer { id name }
-              sellers {
-                company { id name isVerified homepageUrl }
-                offers {
-                  inventoryLevel
-                  prices { quantity currency convertedPrice convertedCurrency }
-                }
-              }
-            }
-          }
-        }
-        '''
-
-        # retry
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = nexar.get_query(gqlQuery, variables) or {}
-                break
-            except Exception as e:
-                wait = 2 ** (attempt - 1)
-                logging.warning(
-                    f"Nexar API ошибка (попытка {attempt}/{max_retries}): {e}. Жду {wait}s."
-                )
-                await asyncio.sleep(wait)
-        else:
-            logging.error(f"Nexar API не ответил после {max_retries} попыток для чанка {i // chunk_size + 1}")
-            continue
-
-        multi_res = response.get("supMultiMatch") or []
-        if isinstance(multi_res, dict):
-            multi_res = [multi_res]
-
-        for block in multi_res:
-            for part in block.get("parts") or []:
-                found_mpn = part.get("mpn")
-                if not found_mpn:
-                    continue
-                # распределяем результаты по mapping
-                for req_mpn, data in mapping.items():
-                    if found_mpn in data["variants"]:
-                        data["results"][found_mpn] = part
-                        break
-
-    # --- 3. Формирование output_data ---
-    for requested_mpn, data in mapping.items():
-        qty = data["quantity"]
-        results = data.get("results") or {}
-
-        if not results:
-            output_data.append({
-                "requested_mpn": requested_mpn,
-                "status": "Не найдено"
-            })
-            continue
-
-        for found_mpn, part in results.items():
-            rows = process_part(
-                part=part,
-                original_mpn=requested_mpn,
-                found_mpn=found_mpn,
-                ALLOWED_SELLERS=ALLOWED_SELLERS,
-                requested_quantity=qty
-            )
-            output_data.extend(rows)
-
-    # --- 4. Формирование JSON для 1С ---
-    final_json = {}
-    for row in output_data:
-        key = row["requested_mpn"]
-        if key not in final_json:
-            final_json[key] = {"requested_mpn": key, "positions": []}
-        final_json[key]["positions"].append(row)
-
-    # --- 5. Отправляем в 1С ---
+def main():
+    """Основная функция запуска watcher"""
+    # Создаем папку для наблюдения если её нет
+    os.makedirs(WATCH_FOLDER, exist_ok=True)
+    
+    logging.info(f"🚀 Запуск File Watcher для папки: {WATCH_FOLDER}")
+    logging.info(f"📊 Размер очереди: {file_queue.qsize()}")
+    
+    # Запускаем рабочий поток
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    
+    # Настраиваем наблюдатель
+    observer = Observer()
+    event_handler = UploadHandler()
+    observer.schedule(event_handler, WATCH_FOLDER, recursive=False)
+    
     try:
-        send_octopart_to_1c(final_json)
-        logging.info("Данные успешно отправлены в 1С")
+        observer.start()
+        logging.info("👀 Наблюдатель запущен и работает...")
+        
+        # Бесконечный цикл для поддержания работы
+        while True:
+            time.sleep(60)  # Проверяем каждую минуту
+            # Можно добавить периодические проверки состояния здесь
+            
+    except KeyboardInterrupt:
+        logging.info("🛑 Получен сигнал остановки...")
     except Exception as e:
-        logging.error(f"Ошибка отправки данных в 1С: {e}")
+        logging.error(f"💥 Критическая ошибка: {e}")
+    finally:
+        logging.info("🧹 Завершение работы...")
+        observer.stop()
+        observer.join()
+        file_queue.put(None)  # Сигнал остановки worker'у
+        worker_thread.join(timeout=10)
 
-    return final_json
-
-
-
-async def process_file_async(filepath):
-    # 1. Читаем Excel без заголовков
-    df = pd.read_excel(filepath, header=None, engine='openpyxl')
-
-    # 2. Формируем список MPN и QTY
-    mpn_list = []
-    for _, row in df.iterrows():
-        mpn_list.append({
-            "mpn": str(row[0]).strip(),
-            "quantity": int(row[1]) if len(row) > 1 else 1
-        })
-
-    # 3. Обработка Nexar и сбор данных
-    result_json = await process_all_mpn(mpn_list, mode="xlsx")
-
-    # 4. Сохраняем JSON-файл рядом с Excel
-    output_json_path = filepath.replace(".xlsx", "_result.json")
-    with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(result_json, f, ensure_ascii=False, indent=2)
-
-    # 5. Отправка в 1С и загрузка на FTP
-    send_octopart_to_1c(result_json)
-    upload_to_ftp(output_json_path)
-
-    return output_json_path
-
-def process_file(filepath):
-    """
-    Синхронная обёртка для Flask/Watcher
-    """
-    return asyncio.run(process_file_async(filepath))
-
-
-# -----------------------------------------------------------------------------------
-# Flask UI
-# -----------------------------------------------------------------------------------
-
-@app.route("/", methods=["GET", "POST"])
-def upload_file():
-    if request.method == "POST":
-
-        if 'file' not in request.files:
-            flash("Файл не найден в запросе")
-            return redirect(request.url)
-
-        file = request.files['file']
-        if file.filename == '':
-            flash("Файл не выбран")
-            return redirect(request.url)
-
-        if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)
-            saved_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            file.save(saved_path)
-
-            try:
-                output_path = process_file(saved_path)
-                flash(f"Готово! Файл выгружен: {os.path.basename(output_path)}")
-            except Exception as e:
-                flash(f"Ошибка: {str(e)}")
-
-            return redirect(url_for("upload_file"))
-
-    return render_template("index.html")
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)), debug=True)
+if __name__ == "__main__":
+    main()
