@@ -24,7 +24,7 @@ file_queue = Queue()
 if os.name == "nt":
     WATCH_FOLDER = "D:/dev/ftp_watcher/watch"
 else:
-    WATCH_FOLDER = "/home/test_project/watch"
+    WATCH_FOLDER = "/home/test_project/ftp_uploads"
 
 def wait_until_file_is_ready(filepath, timeout=60, check_interval=5):
     """Ожидает, пока файл не перестанет изменяться"""
