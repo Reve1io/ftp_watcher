@@ -4,6 +4,5 @@ python-dotenv
 pandas
 requests
 werkzeug
-nexar-client
 zeep
 watchdog
