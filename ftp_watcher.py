@@ -5,85 +5,133 @@ import threading
 from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from app import process_file  # ваша функция
+from app import process_file  # Импортируй свою функцию обработки
 
-logging.basicConfig(level=logging.INFO)
-WATCH_FOLDER = "/home/test_project/ftp_uploads"
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        #logging.FileHandler('/var/log/file-watcher.log'),
+        logging.StreamHandler()
+    ]
+)
+
+# Папка для наблюдения
+WATCH_FOLDER = ""
 file_queue = Queue()
 
-SUPPORTED = (".xlsx", ".csv")
+if os.name == "nt":
+    WATCH_FOLDER = "D:/dev/ftp_watcher/watch"
+else:
+    WATCH_FOLDER = "/home/test_project/watch"
 
-def wait_until_file_is_ready(filepath, timeout=30, check_interval=1):
-    """Ждём стабилизации размера/mtime, чтобы не ловить недописанные файлы."""
+def wait_until_file_is_ready(filepath, timeout=60, check_interval=5):
+    """Ожидает, пока файл не перестанет изменяться"""
     last_size = -1
-    last_mtime = -1
-    stable_ticks = 0
-    needed_stable = 2  # два подряд стабильных замера
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    stable_count = 0
+    required_stable_checks = 5  # Требуем 3 стабильных проверки подряд
+    
+    for attempt in range(timeout):
         try:
-            st = os.stat(filepath)
-            if st.st_size == last_size and st.st_mtime == last_mtime:
-                stable_ticks += 1
-                if stable_ticks >= needed_stable:
+            if not os.path.exists(filepath):
+                logging.warning(f"Файл {filepath} не найден, ожидание...")
+                time.sleep(check_interval)
+                continue
+                
+            current_size = os.path.getsize(filepath)
+            if current_size == last_size:
+                stable_count += 1
+                if stable_count >= required_stable_checks:
+                    logging.info(f"Файл стабилизирован после {attempt} секунд")
                     return True
             else:
-                stable_ticks = 0
-                last_size, last_mtime = st.st_size, st.st_mtime
-        except FileNotFoundError:
-            pass
+                stable_count = 0
+                last_size = current_size
+                
+        except Exception as e:
+            logging.warning(f"Ошибка проверки файла {filepath}: {e}")
+            
         time.sleep(check_interval)
+    
+    logging.warning(f"Файл {filepath} не стабилизировался за {timeout} секунд")
     return False
 
 class UploadHandler(FileSystemEventHandler):
-    def _maybe_enqueue(self, path):
-        if not os.path.isfile(path):
-            return
-        if not path.lower().endswith(SUPPORTED):
-            return
-        filename = os.path.basename(path)
-        logging.info(f"[WATCHER] Найден файл: {filename}, проверяю готовность...")
-        if wait_until_file_is_ready(path):
-            logging.info(f"[WATCHER] Файл {filename} готов, добавляю в очередь")
-            file_queue.put(path)
-        else:
-            logging.error(f"[WATCHER] Файл {filename} не стабилизировался вовремя")
-
     def on_created(self, event):
-        if not event.is_directory:
-            self._maybe_enqueue(event.src_path)
+        if event.is_directory:
+            return
 
-    # иногда клиенты создают через tmp → потом переименовывают
-    def on_moved(self, event):
-        if not event.is_directory:
-            self._maybe_enqueue(event.dest_path)
+        if event.src_path.endswith((".xlsx", ".xls")):
+            filename = os.path.basename(event.src_path)
+            logging.info(f"📁 Обнаружен новый файл: {filename}")
+            
+            # Даем файлу время на полную загрузку
+            time.sleep(2)
+            
+            if wait_until_file_is_ready(event.src_path):
+                logging.info(f"✅ Файл {filename} готов к обработке")
+                file_queue.put(os.path.normpath(event.src_path))
+            else:
+                logging.error(f"❌ Файл {filename} не готов к обработке")
 
 def worker():
+    """Рабочий поток для обработки файлов"""
+    logging.info("👷 Worker thread started")
     while True:
         filepath = file_queue.get()
         if filepath is None:
             break
+            
         try:
-            logging.info(f"[QUEUE] Обработка файла: {filepath}")
-            process_file(filepath)
+            if os.path.exists(filepath):
+                logging.info(f"🔄 Начало обработки: {os.path.basename(filepath)}")
+                process_file(filepath)
+                logging.info(f"✅ Успешно обработан: {os.path.basename(filepath)}")
+            else:
+                logging.error(f"❌ Файл не найден: {filepath}")
+                
         except Exception as e:
-            logging.error(f"[QUEUE] Ошибка при обработке файла {filepath}: {e}")
+            logging.error(f"💥 Ошибка обработки {filepath}: {e}")
         finally:
             file_queue.task_done()
 
-if __name__ == "__main__":
-    logging.info(f"[WATCHER] Наблюдение за папкой {WATCH_FOLDER} начато...")
-
+def main():
+    """Основная функция запуска watcher"""
+    # Создаем папку для наблюдения если её нет
+    os.makedirs(WATCH_FOLDER, exist_ok=True)
+    
+    logging.info(f"🚀 Запуск File Watcher для папки: {WATCH_FOLDER}")
+    logging.info(f"📊 Размер очереди: {file_queue.qsize()}")
+    
+    # Запускаем рабочий поток
+    worker_thread = threading.Thread(target=worker, daemon=True)
+    worker_thread.start()
+    
+    # Настраиваем наблюдатель
     observer = Observer()
-    observer.schedule(UploadHandler(), path=WATCH_FOLDER, recursive=False)
-    observer.start()
-
-    threading.Thread(target=worker, daemon=True).start()
-
+    event_handler = UploadHandler()
+    observer.schedule(event_handler, WATCH_FOLDER, recursive=False)
+    
     try:
+        observer.start()
+        logging.info("👀 Наблюдатель запущен и работает...")
+        
+        # Бесконечный цикл для поддержания работы
         while True:
-            time.sleep(1)
+            time.sleep(60)  # Проверяем каждую минуту
+            # Можно добавить периодические проверки состояния здесь
+            
     except KeyboardInterrupt:
+        logging.info("🛑 Получен сигнал остановки...")
+    except Exception as e:
+        logging.error(f"💥 Критическая ошибка: {e}")
+    finally:
+        logging.info("🧹 Завершение работы...")
         observer.stop()
-    observer.join()
+        observer.join()
+        file_queue.put(None)  # Сигнал остановки worker'у
+        worker_thread.join(timeout=10)
+
+if __name__ == "__main__":
+    main()

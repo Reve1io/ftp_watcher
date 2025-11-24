@@ -7,3 +7,6 @@ ftp_uploads/
 .env
 *.log
 .DS_Store
+.env
+watch
+venv
