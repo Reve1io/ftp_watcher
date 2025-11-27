@@ -17,7 +17,13 @@ import asyncio
 load_dotenv()
 
 # Настройка логирования
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.DEBUG,
+    handlers=[
+        logging.FileHandler("app.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 
 # Конфигурация Flask
 UPLOAD_FOLDER = 'uploads'
