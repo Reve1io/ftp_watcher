@@ -6,3 +6,4 @@ requests
 werkzeug
 zeep
 watchdog
+openpyxl

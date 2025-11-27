@@ -17,7 +17,6 @@ logging.basicConfig(
     ]
 )
 
-# Папка для наблюдения
 WATCH_FOLDER = ""
 file_queue = Queue()
 
@@ -30,7 +29,7 @@ def wait_until_file_is_ready(filepath, timeout=60, check_interval=5):
     """Ожидает, пока файл не перестанет изменяться"""
     last_size = -1
     stable_count = 0
-    required_stable_checks = 5  # Требуем 3 стабильных проверки подряд
+    required_stable_checks = 5
     
     for attempt in range(timeout):
         try:

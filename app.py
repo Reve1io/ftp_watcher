@@ -268,10 +268,6 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
             mpn
             name
             manufacturer { name }
-            similarParts {
-              mpn
-              manufacturer { name }
-            }
           }
         }
       }
@@ -281,7 +277,7 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
 
         for attempt in range(1, max_retries + 1):
             try:
-                result = nexar.get_query(gqlQuery, variables) or {}
+                result = await asyncio.to_thread(nexar.get_query, gqlQuery, variables) or {}
                 break
             except Exception as e:
                 wait = 2 ** (attempt - 1)
@@ -298,9 +294,9 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
             if part and part.get("mpn"):
                 variants.append(part["mpn"])
 
-                for similar in part.get("similarParts", []):
-                    if similar.get("mpn"):
-                        variants.append(similar["mpn"])
+                #for similar in part.get("similarParts", []):
+                    #if similar.get("mpn"):
+                        #variants.append(similar["mpn"])
 
         return variants or [mpn_item["mpn"]]
 
@@ -308,7 +304,6 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
     partial_tasks = [partial_request_variations(item) for item in mpn_list]
     all_variants_lists = await asyncio.gather(*partial_tasks)
 
-    # создаём mapping
     mapping = {
         item["mpn"]: {
             "variants": variants,
@@ -377,13 +372,14 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
                         data["results"][found_mpn] = part
                         break
 
-    # --- 3. Формирование output_data ---
+    flat_output = []
+
     for requested_mpn, data in mapping.items():
-        qty = data["quantity"]
+        qty = data.get("quantity")
         results = data.get("results") or {}
 
         if not results:
-            output_data.append({
+            flat_output.append({
                 "requested_mpn": requested_mpn,
                 "status": "Не найдено"
             })
@@ -397,32 +393,13 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
                 ALLOWED_SELLERS=ALLOWED_SELLERS,
                 requested_quantity=qty
             )
-            output_data.extend(rows)
+            flat_output.extend(rows)
 
-    # --- 4. Формирование JSON для 1С ---
-    final_json = {}
-    for row in output_data:
-        key = row["requested_mpn"]
-        if key not in final_json:
-            final_json[key] = {"requested_mpn": key, "positions": []}
-        final_json[key]["positions"].append(row)
-
-    # --- 5. Отправляем в 1С ---
-    try:
-        send_octopart_to_1c(final_json)
-        logging.info("Данные успешно отправлены в 1С")
-    except Exception as e:
-        logging.error(f"Ошибка отправки данных в 1С: {e}")
-
-    return final_json
-
-
+    return flat_output
 
 async def process_file_async(filepath):
-    # 1. Читаем Excel без заголовков
     df = pd.read_excel(filepath, header=None, engine='openpyxl')
 
-    # 2. Формируем список MPN и QTY
     mpn_list = []
     for _, row in df.iterrows():
         mpn_list.append({
@@ -430,30 +407,14 @@ async def process_file_async(filepath):
             "quantity": int(row[1]) if len(row) > 1 else 1
         })
 
-    # 3. Обработка Nexar и сбор данных
-    result_json = await process_all_mpn(mpn_list, mode="xlsx")
+    flat_json = await process_all_mpn(mpn_list)
 
-    # 4. Сохраняем JSON-файл рядом с Excel
-    output_json_path = filepath.replace(".xlsx", "_result.json")
-    with open(output_json_path, "w", encoding="utf-8") as f:
-        json.dump(result_json, f, ensure_ascii=False, indent=2)
+    send_octopart_to_1c(flat_json)
 
-    # 5. Отправка в 1С и загрузка на FTP
-    send_octopart_to_1c(result_json)
-    upload_to_ftp(output_json_path)
-
-    return output_json_path
+    return flat_json
 
 def process_file(filepath):
-    """
-    Синхронная обёртка для Flask/Watcher
-    """
     return asyncio.run(process_file_async(filepath))
-
-
-# -----------------------------------------------------------------------------------
-# Flask UI
-# -----------------------------------------------------------------------------------
 
 @app.route("/", methods=["GET", "POST"])
 def upload_file():
@@ -482,7 +443,6 @@ def upload_file():
             return redirect(url_for("upload_file"))
 
     return render_template("index.html")
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5004)), debug=True)
