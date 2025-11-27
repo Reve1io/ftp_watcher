@@ -283,7 +283,8 @@ async def process_all_mpn(mpn_list, mode="xlsx", chunk_size=15, max_retries=3):
 
         for attempt in range(1, max_retries + 1):
             try:
-                result = await asyncio.to_thread(nexar.get_query, gqlQuery, variables) or {}
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(nexar.get_query, gqlQuery, variables) or {}
                 break
             except Exception as e:
                 wait = 2 ** (attempt - 1)
